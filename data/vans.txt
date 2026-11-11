@@ -1,0 +1,10 @@
+1;UNLOAD;30;false
+2;LOAD;40;false
+3;LOAD;20;true
+4;UNLOAD;25;false
+5;LOAD;30;false
+6;UNLOAD;40;true
+7;LOAD;15;false
+8;UNLOAD;20;false
+9;LOAD;25;true
+10;UNLOAD;35;false
