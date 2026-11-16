@@ -24,12 +24,12 @@ public class Van implements Callable<Integer> {
     }
 
     @Override
-    public Integer call() throws InterruptedException {
+    public Integer call() {
         LOGGER.info("Van {} arrived to {} {} goods, perishable: {}", vanId, operation, cargoAmount, perishable);
-        while (!state.isFinal()) {
+        while (!state.isFinal() && !Thread.currentThread().isInterrupted()) {
             state.handle(this);
         }
-        return cargoAmount;
+        return state.isFinal() ? cargoAmount : 0;
     }
 
     public int getVanId() {

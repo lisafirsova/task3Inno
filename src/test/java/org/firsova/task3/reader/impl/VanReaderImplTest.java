@@ -15,6 +15,6 @@ class VanReaderImplTest {
     void missingFileFallsBackToDefaultFile() throws LogisticsException {
         List<String> lines = reader.readLines("no-such-file.txt");
 
-        assertEquals("1;UNLOAD;30;false", lines.get(0));
+        assertEquals("1;UNLOAD;20;false", lines.get(0));
     }
 }

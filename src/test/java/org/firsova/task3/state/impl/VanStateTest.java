@@ -20,7 +20,7 @@ class VanStateTest {
     }
 
     @Test
-    void vanPassesAllStatesAndReturnsCargoAmount() throws InterruptedException {
+    void vanPassesAllStatesAndReturnsCargoAmount() {
         Van van = new Van(202, CargoOperation.UNLOAD, 5, false);
 
         int processed = van.call();

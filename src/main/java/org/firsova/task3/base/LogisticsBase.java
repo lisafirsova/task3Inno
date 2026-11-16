@@ -8,30 +8,30 @@ import org.firsova.task3.entity.Van;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 
 public class LogisticsBase {
     private static final Logger LOGGER = LogManager.getLogger(LogisticsBase.class);
-    private static final int TERRITORY_CAPACITY = 3;
-    private static final int TERMINAL_COUNT = 2;
+    private static final int TERMINAL_COUNT = 3;
     private static final int STORAGE_CAPACITY = 100;
-    private static final int INITIAL_GOODS = 50;
+    private static final int NORMAL_STOCK = STORAGE_CAPACITY / 2;
+    private static final int LOW_STOCK = STORAGE_CAPACITY / 4;
+    private static final int HIGH_STOCK = STORAGE_CAPACITY * 3 / 4;
 
     private static final Lock instanceLock = new ReentrantLock();
     private static final AtomicBoolean instanceCreated = new AtomicBoolean(false);
     private static LogisticsBase instance;
 
-    private final Lock lock = new ReentrantLock(true);
-    private final Condition baseChanged = lock.newCondition();
+    private final Lock terminalLock = new ReentrantLock(true);
+    private final Condition terminalReleased = terminalLock.newCondition();
     private final Deque<Terminal> freeTerminals = new ArrayDeque<>();
-    private final Deque<Van> waitingPerishableVans = new ArrayDeque<>();
-    private int vansOnTerritory;
-    private int goodsInStock = INITIAL_GOODS;
-    private int reservedForLoading;
-    private int reservedForUnloading;
+    private final AtomicInteger goodsInStock = new AtomicInteger(NORMAL_STOCK);
+    private int waitingPerishableVans;
 
     private LogisticsBase() {
         for (int i = 1; i <= TERMINAL_COUNT; i++) {
@@ -54,106 +54,68 @@ public class LogisticsBase {
         return instance;
     }
 
-    public void enterTerritory(Van van) throws InterruptedException {
-        lock.lock();
-        try {
-            if (van.isPerishable()) {
-                waitingPerishableVans.add(van);
-            }
-            try {
-                if (!canEnter(van)) {
-                    LOGGER.info("Van {} waits in the queue outside the base", van.getVanId());
-                }
-                while (!canEnter(van)) {
-                    baseChanged.await();
-                }
-            } finally {
-                waitingPerishableVans.remove(van);
-            }
-            vansOnTerritory++;
-            reserveStorage(van);
-            LOGGER.info("Van {} entered the territory, vans on territory: {}", van.getVanId(), vansOnTerritory);
-        } finally {
-            lock.unlock();
+    public Optional<Terminal> takeTerminal(Van van) {
+        terminalLock.lock();
+        if (van.isPerishable()) {
+            waitingPerishableVans++;
         }
-    }
-
-    public Terminal acquireTerminal() throws InterruptedException {
-        lock.lock();
         try {
-            while (freeTerminals.isEmpty()) {
-                baseChanged.await();
+            while (freeTerminals.isEmpty() || (!van.isPerishable() && waitingPerishableVans > 0)) {
+                terminalReleased.await();
             }
-            return freeTerminals.poll();
+            Terminal terminal = freeTerminals.poll();
+            LOGGER.info("Van {} drove to terminal {}", van.getVanId(), terminal.terminalId());
+            return Optional.of(terminal);
+        } catch (InterruptedException e) {
+            LOGGER.warn("Van {} stopped waiting for a terminal", van.getVanId(), e);
+            Thread.currentThread().interrupt();
+            return Optional.empty();
         } finally {
-            lock.unlock();
+            if (van.isPerishable()) {
+                waitingPerishableVans--;
+                terminalReleased.signalAll();
+            }
+            terminalLock.unlock();
         }
     }
 
     public void releaseTerminal(Terminal terminal) {
-        lock.lock();
+        terminalLock.lock();
         try {
             freeTerminals.add(terminal);
-            baseChanged.signalAll();
+            terminalReleased.signalAll();
         } finally {
-            lock.unlock();
+            terminalLock.unlock();
         }
     }
 
-    public void completeService(Van van) {
-        lock.lock();
-        try {
-            if (van.getOperation() == CargoOperation.LOAD) {
-                goodsInStock -= van.getCargoAmount();
-                reservedForLoading -= van.getCargoAmount();
-            } else {
-                goodsInStock += van.getCargoAmount();
-                reservedForUnloading -= van.getCargoAmount();
+    public boolean transferGoods(Van van) {
+        int amount = van.getCargoAmount();
+        int current;
+        int updated;
+        do {
+            current = goodsInStock.get();
+            updated = van.getOperation() == CargoOperation.LOAD ? current - amount : current + amount;
+            if (updated < 0 || updated > STORAGE_CAPACITY) {
+                return false;
             }
-            vansOnTerritory--;
-            LOGGER.info("Van {} served and left the base, goods in stock: {}", van.getVanId(), goodsInStock);
-            baseChanged.signalAll();
-        } finally {
-            lock.unlock();
-        }
+        } while (!goodsInStock.compareAndSet(current, updated));
+        LOGGER.info("Van {} {} {} goods, goods in stock: {}", van.getVanId(), van.getOperation(), amount, updated);
+        return true;
+    }
+
+    public int balanceStock() {
+        int current;
+        do {
+            current = goodsInStock.get();
+            if (current >= LOW_STOCK && current <= HIGH_STOCK) {
+                return 0;
+            }
+        } while (!goodsInStock.compareAndSet(current, NORMAL_STOCK));
+        return NORMAL_STOCK - current;
     }
 
     public int getGoodsInStock() {
-        lock.lock();
-        try {
-            return goodsInStock;
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    private boolean canEnter(Van van) {
-        boolean hasFreePlace = vansOnTerritory < TERRITORY_CAPACITY;
-        boolean yieldsToPerishable = !van.isPerishable() && hasServablePerishableVan();
-        return hasFreePlace && canServe(van) && !yieldsToPerishable;
-    }
-
-    private boolean canServe(Van van) {
-        if (van.getOperation() == CargoOperation.LOAD) {
-            return goodsInStock - reservedForLoading >= van.getCargoAmount();
-        }
-        return goodsInStock + reservedForUnloading + van.getCargoAmount() <= STORAGE_CAPACITY;
-    }
-
-    private boolean hasServablePerishableVan() {
-        for (Van perishableVan : waitingPerishableVans) {
-            if (canServe(perishableVan)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private void reserveStorage(Van van) {
-        if (van.getOperation() == CargoOperation.LOAD) {
-            reservedForLoading += van.getCargoAmount();
-        } else {
-            reservedForUnloading += van.getCargoAmount();
-        }
+        return goodsInStock.get();
     }
 }
